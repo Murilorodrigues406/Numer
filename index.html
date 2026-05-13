@@ -774,21 +774,124 @@ let editId=null,detId=null,gcalOn=localStorage.getItem('df3_gcal')==='1';
 let curStage='planejado',curRem='none',mSelDate=fmt(new Date());
 
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2);}
-function save(){localStorage.setItem('df3_evs',JSON.stringify(evs));}
 function fmt(d){return d.toISOString().slice(0,10);}
 function addD(d,n){const r=new Date(d);r.setDate(r.getDate()+n);return r;}
 function parseLocal(s){const[y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d);}
 function daysBetween(s1,s2){return Math.round((parseLocal(s2)-parseLocal(s1))/86400000);}
 
-function seed(){
-  if(evs.length)return;
+// ── CACHE LOCAL (fallback offline) ──
+function saveLocal(){localStorage.setItem('df3_evs',JSON.stringify(evs));}
+function saveFinLocal(){localStorage.setItem('df3_fin',JSON.stringify(finTxs));}
+
+// ── SUPABASE: TAREFAS ──
+async function save(evObj){
+  saveLocal();
+  if(!currentUser||!supa) return;
+  try{
+    await supa.from('events').upsert({
+      id: evObj.id,
+      user_id: currentUser.id,
+      title: evObj.title,
+      description: evObj.desc||'',
+      time: evObj.time,
+      date: evObj.date,
+      view: evObj.view,
+      cat: evObj.cat,
+      stage: evObj.stage,
+      rem: evObj.rem,
+      done: evObj.done
+    });
+  }catch(e){console.warn('Supabase save event error:',e);}
+}
+
+async function saveAll(){
+  saveLocal();
+  if(!currentUser||!supa) return;
+  try{
+    // Apaga tudo do usuário e reinserve (sync completo)
+    await supa.from('events').delete().eq('user_id',currentUser.id);
+    if(evs.length){
+      await supa.from('events').insert(evs.map(e=>({
+        id:e.id, user_id:currentUser.id,
+        title:e.title, description:e.desc||'',
+        time:e.time, date:e.date, view:e.view,
+        cat:e.cat, stage:e.stage, rem:e.rem, done:e.done
+      })));
+    }
+  }catch(e){console.warn('Supabase saveAll error:',e);}
+}
+
+async function deleteEvCloud(id){
+  if(!currentUser||!supa) return;
+  try{ await supa.from('events').delete().eq('id',id).eq('user_id',currentUser.id); }
+  catch(e){console.warn('Supabase delete event error:',e);}
+}
+
+async function loadEventsFromCloud(){
+  if(!currentUser||!supa) return;
+  try{
+    const{data,error}=await supa.from('events').select('*').eq('user_id',currentUser.id);
+    if(error||!data) return;
+    evs=data.map(e=>({
+      id:e.id, title:e.title, desc:e.description||'',
+      time:e.time, date:e.date, view:e.view,
+      cat:e.cat, stage:e.stage, rem:e.rem, done:e.done
+    }));
+    saveLocal();
+  }catch(e){console.warn('Supabase load events error:',e);}
+}
+
+// ── SUPABASE: FINANÇAS ──
+async function saveFin(){
+  saveFinLocal();
+  if(!currentUser||!supa) return;
+  try{
+    await supa.from('transactions').delete().eq('user_id',currentUser.id);
+    if(finTxs.length){
+      await supa.from('transactions').insert(finTxs.map(t=>({
+        id:t.id, user_id:currentUser.id,
+        desc:t.desc, val:t.val, date:t.date, cat:t.cat, tipo:t.tipo
+      })));
+    }
+  }catch(e){console.warn('Supabase saveFin error:',e);}
+}
+
+async function saveFinOne(tx){
+  saveFinLocal();
+  if(!currentUser||!supa) return;
+  try{
+    await supa.from('transactions').upsert({
+      id:tx.id, user_id:currentUser.id,
+      desc:tx.desc, val:tx.val, date:tx.date, cat:tx.cat, tipo:tx.tipo
+    });
+  }catch(e){console.warn('Supabase saveFinOne error:',e);}
+}
+
+async function deleteFinCloud(id){
+  if(!currentUser||!supa) return;
+  try{ await supa.from('transactions').delete().eq('id',id).eq('user_id',currentUser.id); }
+  catch(e){console.warn('Supabase delete fin error:',e);}
+}
+
+async function loadFinFromCloud(){
+  if(!currentUser||!supa) return;
+  try{
+    const{data,error}=await supa.from('transactions').select('*').eq('user_id',currentUser.id);
+    if(error||!data) return;
+    finTxs=data.map(t=>({id:t.id,desc:t.desc,val:parseFloat(t.val),date:t.date,cat:t.cat,tipo:t.tipo}));
+    saveFinLocal();
+  }catch(e){console.warn('Supabase load fin error:',e);}
+}
+
+async function seed(){
+  if(evs.length) return;
   const t=fmt(new Date());
   evs=[
     {id:uid(),title:'Café da manhã',desc:'Comece o dia com energia',time:'07:30',cat:'manha',view:'pessoal',date:t,stage:'planejado',rem:'none',done:false},
     {id:uid(),title:'Almoço com a família',desc:'Pausa para refeição em família',time:'12:30',cat:'familia',view:'pessoal',date:t,stage:'planejado',rem:'none',done:false},
     {id:uid(),title:'Leitura antes de dormir',desc:'30 minutos de leitura relaxante',time:'21:30',cat:'noite',view:'pessoal',date:t,stage:'planejado',rem:'none',done:false},
   ];
-  save();
+  await saveAll();
 }
 
 function greet(){const h=new Date().getHours();return h<12?'Bom dia':h<18?'Boa tarde':'Boa noite';}
@@ -869,8 +972,6 @@ let curFinTipo='entrada';
 const FIN_CAT_LABELS={salario:'💼 Salário',rendaextra:'💰 Renda Extra',alimentacao:'🍽️ Alimentação',transporte:'🚗 Transporte',moradia:'🏠 Moradia',saude:'💊 Saúde',lazer:'🎮 Lazer',educacao:'📚 Educação',outros:'📦 Outros'};
 const FIN_CAT_LABELS_PLAIN={salario:'Salário',rendaextra:'Renda Extra',alimentacao:'Alimentação',transporte:'Transporte',moradia:'Moradia',saude:'Saúde',lazer:'Lazer',educacao:'Educação',outros:'Outros'};
 const FIN_CAT_COLORS={salario:'#0F1C35',rendaextra:'#1A9E5A',alimentacao:'#E8A020',transporte:'#0B8FAC',moradia:'#6B3FA0',saude:'#E8284A',lazer:'#F26B1D',educacao:'#2E4270',outros:'#6B7FA8'};
-function saveFin(){localStorage.setItem('df3_fin',JSON.stringify(finTxs));}
-
 function renderFinance(){
   const el=document.getElementById('financeScreen');
   if(!el)return;
@@ -997,21 +1098,26 @@ function openFinOv(){
   document.getElementById('finOv').classList.add('open');
 }
 function closeFinOv(ev){if(ev&&ev.target!==document.getElementById('finOv'))return;document.getElementById('finOv').classList.remove('open');}
-function saveFinTx(){
+async function saveFinTx(){
   const desc=document.getElementById('fFinDesc').value.trim();
   const val=parseFloat(document.getElementById('fFinVal').value);
   const date=document.getElementById('fFinDate').value;
   const cat=document.getElementById('fFinCat').value;
   if(!desc){showToast('⚠️ Informe a descrição');return;}
   if(!val||val<=0){showToast('⚠️ Informe o valor');return;}
-  finTxs.push({id:uid(),desc,val,date,cat,tipo:curFinTipo});
-  saveFin();document.getElementById('finOv').classList.remove('open');
+  const tx={id:uid(),desc,val,date,cat,tipo:curFinTipo};
+  finTxs.push(tx);
+  await saveFinOne(tx);
+  document.getElementById('finOv').classList.remove('open');
   showToast(curFinTipo==='entrada'?'✅ Entrada registrada!':'🔴 Saída registrada!');
   renderFinance();
 }
-function deleteFinTx(id){
+async function deleteFinTx(id){
   if(!confirm('Excluir essa transação?'))return;
-  finTxs=finTxs.filter(t=>t.id!==id);saveFin();showToast('🗑️ Excluída!');renderFinance();
+  finTxs=finTxs.filter(t=>t.id!==id);
+  saveFinLocal();
+  await deleteFinCloud(id);
+  showToast('🗑️ Excluída!');renderFinance();
 }
 function editFinTx(id){
   const tx=finTxs.find(t=>t.id===id);if(!tx)return;
@@ -1022,7 +1128,7 @@ function editFinTx(id){
   if(saveBtn){saveBtn.textContent='Atualizar ✓';saveBtn.onclick=()=>updateFinTx(id);}
   document.getElementById('finOv').classList.add('open');
 }
-function updateFinTx(id){
+async function updateFinTx(id){
   const desc=document.getElementById('fFinDesc').value.trim();
   const val=parseFloat(document.getElementById('fFinVal').value);
   const date=document.getElementById('fFinDate').value;
@@ -1030,7 +1136,9 @@ function updateFinTx(id){
   if(!desc){showToast('⚠️ Informe a descrição');return;}
   if(!val||val<=0){showToast('⚠️ Informe o valor');return;}
   finTxs=finTxs.map(t=>t.id===id?{...t,desc,val,date,cat,tipo:curFinTipo}:t);
-  saveFin();document.getElementById('finOv').classList.remove('open');
+  const tx=finTxs.find(t=>t.id===id);
+  await saveFinOne(tx);
+  document.getElementById('finOv').classList.remove('open');
   const saveBtn=document.querySelector('[onclick*="updateFinTx"]');
   if(saveBtn){saveBtn.textContent='Salvar ✓';saveBtn.onclick=saveFinTx;}
   showToast('✅ Atualizada!');renderFinance();
@@ -1126,10 +1234,10 @@ function openRL(type){
 }
 function closeRL(ev){if(ev&&ev.target!==document.getElementById('rlOv'))return;document.getElementById('rlOv').classList.remove('open');}
 
-function togDone(ev,id){
+async function togDone(ev,id){
   ev.stopPropagation();
   const i=evs.findIndex(e=>e.id===id);
-  if(i>-1){evs[i].done=!evs[i].done;if(evs[i].done)evs[i].stage='concluido';save();render();}
+  if(i>-1){evs[i].done=!evs[i].done;if(evs[i].done)evs[i].stage='concluido';await save(evs[i]);render();}
 }
 
 function selStage(s){curStage=s;document.querySelectorAll('.sopt').forEach(o=>{o.className='sopt'+(o.dataset.s===s?` s-${s}`:'');});}
@@ -1143,13 +1251,13 @@ function openForm(id=null){
   document.getElementById('fmOv').classList.add('open');
 }
 function closeForm(ev){if(ev&&ev.target!==document.getElementById('fmOv'))return;document.getElementById('fmOv').classList.remove('open');editId=null;}
-function saveEv(){
+async function saveEv(){
   const title=document.getElementById('fTitle').value.trim();
   if(!title){showToast('⚠️ Informe o título');return;}
   const ev={id:editId||uid(),title,desc:document.getElementById('fDesc').value.trim(),time:document.getElementById('fTime').value,date:document.getElementById('fDate').value,view:document.getElementById('fView').value,cat:document.getElementById('fCat').value,stage:curStage,rem:curRem,done:editId?evs.find(e=>e.id===editId).done:false};
   if(editId){const i=evs.findIndex(e=>e.id===editId);evs[i]=ev;showToast('✅ Atualizado!');}
   else{evs.push(ev);showToast('✅ Criado!');}
-  save();render();document.getElementById('fmOv').classList.remove('open');editId=null;
+  await save(ev);render();document.getElementById('fmOv').classList.remove('open');editId=null;
 }
 
 function openDet(id){
@@ -1164,13 +1272,13 @@ function openDet(id){
 }
 function closeDet(ev){if(ev&&ev.target!==document.getElementById('detOv'))return;document.getElementById('detOv').classList.remove('open');}
 function editEv(){closeDet();openForm(detId);}
-function delEv(){evs=evs.filter(e=>e.id!==detId);save();render();closeDet();showToast('🗑 Removido');}
-function advStage(){
+async function delEv(){evs=evs.filter(e=>e.id!==detId);saveLocal();await deleteEvCloud(detId);render();closeDet();showToast('🗑 Removido');}
+async function advStage(){
   const i=evs.findIndex(e=>e.id===detId);if(i<0)return;
   const idx=STG_O.indexOf(evs[i].stage);
   if(idx<0||idx>=STG_O.length-1){showToast('🏁 Já no estágio final');return;}
   evs[i].stage=STG_O[idx+1];if(evs[i].stage==='concluido')evs[i].done=true;
-  save();render();
+  await save(evs[i]);render();
   document.getElementById('dStBadge').textContent=STG_L[evs[i].stage];
   document.getElementById('dStBadge').className=`sb sb-${evs[i].stage}`;
   showToast(`⚡ ${STG_L[evs[i].stage]}`);
@@ -1401,9 +1509,13 @@ async function enterApp(user){
   const av=localStorage.getItem('df3_av');
   if(av){document.getElementById('avImg').src=av;document.getElementById('avImg').style.display='block';document.getElementById('avPh').style.display='none';document.getElementById('perfAvImg').src=av;document.getElementById('perfAvImg').style.display='block';document.getElementById('perfAvPh').style.display='none';}
   else{document.getElementById('avImg').style.display='none';document.getElementById('avPh').style.display='';document.getElementById('perfAvImg').style.display='none';document.getElementById('perfAvPh').style.display='';}
+  // Carrega tarefas e finanças da nuvem (fonte da verdade)
+  showToast('☁️ Sincronizando dados...');
   evs=JSON.parse(localStorage.getItem('df3_evs')||'[]');
   finTxs=JSON.parse(localStorage.getItem('df3_fin')||'[]');
-  if(evs.length===0)seed();
+  await loadEventsFromCloud();
+  await loadFinFromCloud();
+  if(evs.length===0) await seed();
   const scr=document.getElementById('authScreen');
   if(scr){scr.style.transition='opacity .3s';scr.style.opacity='0';setTimeout(()=>scr.remove(),300);}
   document.querySelector('.app').style.display='';
